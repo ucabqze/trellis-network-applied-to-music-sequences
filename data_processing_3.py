@@ -57,8 +57,21 @@ def feature_all(track_features):
     #print(track_features.iloc[0])
     return track_features
 
-def change_feature_weight(track_features):
-    return track_features
+def feature_all_2(sessions):
+    feature_group1 = ['skip_1','skip_2','skip_3','not_skipped','context_switch',
+                      'no_pause_before_play','short_pause_before_play','short_pause_before_play',
+                      'hist_user_behavior_is_shuffle','premium']
+    feature_group2 = ['hist_user_behavior_n_seekfwd','hist_user_behavior_n_seekback',
+                      'context_type','hist_user_behavior_reason_start','hist_user_behavior_reason_end']
+    feature_group3 = ['hour_of_day']
+    
+    sessions = feature_one_hot(feature_group1,sessions,sessions)
+    sessions = feature_one_hot(feature_group2,sessions,sessions)
+    sessions = feature_normalisation(feature_group3,sessions,sessions)
+    
+    return sessions
+
+    
 
 ###############################################################################
 # process track id
@@ -100,39 +113,23 @@ def batchify(data, bsz, cuda=False):
 
 def sessions_segmentation(sessions):    
     
-#    sessions_list = []
-#    label_list = []
-#    
-#    i = 0
-#    while i < len(sessions):
-#        from_ = i
-#        to_ = i+sessions.iloc[i].session_length
-#        
-#        tracks_in_a_session = sessions.iloc[from_:to_].track_id_clean
-#        skips1_in_a_session = sessions.iloc[from_:to_].skip_1
-#        skips2_in_a_session = sessions.iloc[from_:to_].skip_2
-#        skips3_in_a_session = sessions.iloc[from_:to_].skip_3
-#        label_in_a_session = (torch.Tensor(np.array(skips1_in_a_session))+
-#                              torch.Tensor(np.array(skips2_in_a_session))+
-#                              torch.Tensor(np.array(skips3_in_a_session)))
-#        sessions_list.append(torch.Tensor(np.array(tracks_in_a_session)).long())
-#        label_list.append(label_in_a_session.long())
-#        i = to_
-     
+
     gp_track = sessions['track_id_clean'].groupby(sessions['session_id'])
     data_list = [torch.Tensor(np.array(gp_track.get_group(x))).long() for x in gp_track.groups]
     
     gp_skip = sessions[['skip_1','skip_2','skip_3']].groupby(sessions['session_id'])
     label_list = [torch.Tensor(np.array(gp_skip.get_group(x))).sum(1).long() for x in gp_skip.groups]
-
-    return data_list,label_list
-# the max len of tracks_in_a_session in 'training_set1/log_0_20180715_000000000000.csv' is 20
+    
+    start_index = np.insert(np.cumsum(np.unique(sessions.session_id.values, return_counts=True)[1])[:-1], 0, 0)
+    end_index =  np.cumsum(np.unique(sessions.session_id.values, return_counts=True)[1])
+    feature_index_list = [torch.tensor(range(start_index[i]+1,end_index[i]+1)) for i in range(len(end_index))]# pad for the first row
+     
+    return data_list,label_list, feature_index_list
     
 
 def get_track_dic(track_features):
     # process track features
     track_features = feature_all(track_features)
-    track_features = change_feature_weight(track_features) 
     track_features = process_id_t(track_features)
     
     # build track dict
@@ -144,6 +141,21 @@ def get_track_dic(track_features):
         track_dic[track_id] = track_vec
     return track_dic
           
+def get_session_matrix(sessions):
+    sessions = feature_all_2(sessions)
+    
+    feature_group = ['skip_1','skip_2','skip_3','not_skipped','context_switch',
+                      'no_pause_before_play','short_pause_before_play',
+                      'short_pause_before_play','hist_user_behavior_is_shuffle',
+                      'premium','hist_user_behavior_n_seekfwd','hist_user_behavior_n_seekback',
+                      'context_type','hist_user_behavior_reason_start',
+                      'hist_user_behavior_reason_end','hour_of_day']
+    sessions = torch.from_numpy(np.array(sessions[feature_group]))
+    sessions = torch.cat([torch.zeros(sessions.shape[1]).unsqueeze(0),sessions.float()],dim=0)
+    
+    return sessions
+    
+    
 def get_data(batch_size, sessions, maxlen):
     
     """ Note: you should build track dictionary using function get_track_dic before get data"""
@@ -156,7 +168,7 @@ def get_data(batch_size, sessions, maxlen):
         print('*'*95)
         return None, None
     else:
-        sessions_list,label_list = sessions_segmentation(sessions)
+        sessions_list,label_list, feature_index_list = sessions_segmentation(sessions)
         
         # convert sequences to same length
         #args.seqlen = 20
@@ -165,15 +177,17 @@ def get_data(batch_size, sessions, maxlen):
         sessions_list = torch.Tensor(sessions_list).long()
         label_list = preprocessing.sequence.pad_sequences(label_list,maxlen, padding='post',truncating='post',value=-1)
         label_list = torch.Tensor(label_list).long()
+        feature_index_list = preprocessing.sequence.pad_sequences(feature_index_list,maxlen, padding='post',truncating='post',value=0)
+        feature_index_list = torch.Tensor(feature_index_list).long()
         #sessions_list = torch.nn.utils.rnn.pad_sequence(sessions_list, batch_first=True) 
         #label_list = torch.nn.utils.rnn.pad_sequence(label_list,batch_first=True) 
      
         # convert input shape
         input_ = batchify(sessions_list, batch_size, cuda = False).long()
-#      
         label = batchify(label_list, batch_size, cuda = False).long()
+        session_feature_pos= batchify(feature_index_list, batch_size, cuda = False).long()
         ### note: return scalar instead of float
         #return sessions_list,label_list
-        return input_, label
+        return input_, label, session_feature_pos
 
     
